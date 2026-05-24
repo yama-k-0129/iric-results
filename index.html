@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>水理解析結果ビューア</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:100%; height:100%; overflow:hidden; font-family:'Hiragino Sans','Meiryo',sans-serif; background:#111; }
+
+#map {
+  position:absolute; top:0; left:0; right:0;
+  bottom:80px;
+}
+
+
+/* コントロールパネル */
+#panel {
+  position:absolute; bottom:0; left:0; right:0; height:80px;
+  background:rgba(20,20,20,0.96); color:#fff;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  padding:4px 8px; gap:5px; z-index:1000;
+}
+.row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:center; }
+
+button {
+  background:#2563eb; color:#fff; border:none; border-radius:4px;
+  padding:5px 10px; cursor:pointer; font-size:13px; white-space:nowrap;
+}
+button:hover { filter:brightness(1.15); }
+button:disabled { background:#444; cursor:default; }
+#btn-upload  { background:#16a34a; }
+#btn-refresh { background:#9333ea; }
+#btn-settings { background:#475569; font-size:15px; padding:5px 8px; }
+
+input[type=range]  { width:90px; accent-color:#60a5fa; }
+input[type=number] { width:60px; background:#333; color:#fff; border:1px solid #555; border-radius:3px; padding:3px 5px; font-size:12px; }
+.lbl { font-size:11px; color:#ccc; white-space:nowrap; }
+#step-disp { font-size:13px; font-weight:bold; min-width:44px; text-align:center; }
+label.chk { font-size:12px; display:flex; align-items:center; gap:3px; }
+
+/* 凡例 */
+#legend {
+  position:absolute; top:10px; right:10px;
+  background:rgba(255,255,255,0.92); border-radius:6px;
+  padding:6px 8px; z-index:800; font-size:11px; min-width:140px;
+}
+#legend-bar { width:124px; height:14px; border-radius:2px; }
+.leg-labels { display:flex; justify-content:space-between; margin-top:2px; color:#333; }
+.leg-title  { text-align:center; color:#555; margin-top:1px; }
+
+/* ステータストースト */
+#toast {
+  position:absolute; top:10px; left:50%; transform:translateX(-50%);
+  background:rgba(0,0,0,0.80); color:#fff;
+  padding:5px 14px; border-radius:20px; z-index:900;
+  font-size:13px; display:none; white-space:nowrap; max-width:90vw;
+  text-overflow:ellipsis; overflow:hidden;
+}
+
+/* 設定パネル */
+#settings-overlay {
+  display:none; position:absolute; inset:0; z-index:2000;
+  background:rgba(0,0,0,0.5); align-items:center; justify-content:center;
+}
+#settings-overlay.open { display:flex; }
+#settings-box {
+  background:#1e293b; color:#fff; border-radius:10px;
+  padding:20px; width:min(420px, 92vw); max-height:90vh; overflow-y:auto;
+}
+#settings-box h2 { margin-bottom:14px; font-size:16px; color:#93c5fd; }
+#settings-box h3 { font-size:13px; color:#94a3b8; margin:14px 0 6px; border-bottom:1px solid #334155; padding-bottom:4px; }
+.srow { display:flex; flex-direction:column; gap:3px; margin-bottom:10px; }
+.srow label  { font-size:11px; color:#94a3b8; }
+.srow input  { background:#0f172a; color:#fff; border:1px solid #475569; border-radius:4px; padding:6px 8px; font-size:13px; width:100%; }
+.srow input:focus { outline:none; border-color:#3b82f6; }
+.srow .hint  { font-size:10px; color:#64748b; margin-top:2px; }
+.sbtn-row { display:flex; gap:8px; margin-top:16px; }
+.sbtn-row button { flex:1; padding:8px; font-size:13px; }
+#btn-save-settings  { background:#16a34a; }
+#btn-close-settings { background:#475569; }
+.gh-link { color:#60a5fa; font-size:11px; text-decoration:none; }
+.gh-link:hover { text-decoration:underline; }
+#gh-status { font-size:11px; color:#4ade80; margin-top:6px; min-height:16px; }
+
+#file-input { display:none; }
+
+@media (max-width:480px) {
+  #panel { height:90px; }
+  #map,#overlay { bottom:90px; }
+  input[type=range] { width:70px; }
+}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="legend">
+  <canvas id="legend-bar" width="124" height="14"></canvas>
+  <div class="leg-labels">
+    <span>0</span><span id="leg-max">1.00</span>
+  </div>
+  <div class="leg-title">水深 (m)</div>
+</div>
+
+<div id="toast"></div>
+
+<!-- コントロールパネル -->
+<div id="panel">
+  <div class="row">
+    <button id="btn-upload">📂 読込</button>
+    <input type="file" id="file-input" multiple accept=".out">
+
+    <button id="btn-prev" disabled>◀</button>
+    <button id="btn-play" disabled>▶</button>
+    <button id="btn-next" disabled>▶▶</button>
+    <span id="step-disp">-/-</span>
+
+    <span class="lbl">速度:</span>
+    <input type="range" id="sl-speed" min="1" max="10" value="3">
+    <label class="chk"><input type="checkbox" id="chk-loop" checked> ループ</label>
+
+    <button id="btn-refresh" title="GitHubから最新データを読込">🔄 更新</button>
+    <button id="btn-settings" title="GitHub接続設定">⚙</button>
+  </div>
+  <div class="row">
+    <span class="lbl">透過度:</span>
+    <input type="range" id="sl-opacity" min="0" max="100" value="70">
+    <span id="lbl-opacity" class="lbl">70%</span>
+    <span class="lbl">最大値(m):</span>
+    <input type="number" id="in-maxval" value="1.0" step="0.1" min="0.01">
+    <button id="btn-auto">自動</button>
+  </div>
+</div>
+
+<!-- 設定パネル -->
+<div id="settings-overlay">
+  <div id="settings-box">
+    <h2>⚙ GitHub 接続設定</h2>
+    <p style="font-size:11px;color:#94a3b8;line-height:1.5">
+      PCで計算結果をアップロードし、スマホで閲覧するためにGitHubを使います。<br>
+      設定はブラウザに保存されます。
+    </p>
+
+    <h3>GitHubアカウント情報</h3>
+    <div class="srow">
+      <label>ユーザー名 (GitHubのアカウント名)</label>
+      <input id="gh-owner" type="text" placeholder="例: yamada-taro">
+    </div>
+    <div class="srow">
+      <label>リポジトリ名</label>
+      <input id="gh-repo" type="text" placeholder="例: iric-results">
+      <span class="hint">事前にGitHubで作成しておいてください</span>
+    </div>
+    <div class="srow">
+      <label>Personal Access Token (write権限)</label>
+      <input id="gh-token" type="password" placeholder="ghp_xxxxxxxxxxxx">
+      <span class="hint">
+        <a class="gh-link" href="https://github.com/settings/tokens/new?scopes=repo&description=iric-viewer" target="_blank">
+          ← クリックでトークン作成ページを開く
+        </a>
+        (repoにチェックを入れて生成)
+      </span>
+    </div>
+    <div class="srow">
+      <label>ブランチ名</label>
+      <input id="gh-branch" type="text" placeholder="main">
+    </div>
+
+    <div id="gh-status"></div>
+
+    <h3>使い方</h3>
+    <ol style="font-size:11px;color:#94a3b8;line-height:1.8;padding-left:16px">
+      <li>github.com でリポジトリを新規作成（Initialize with README にチェック）</li>
+      <li>上のリンクからPersonal Access Tokenを作成してここに貼り付け</li>
+      <li>「保存 &amp; 接続テスト」をクリックして確認</li>
+      <li>PCで「📂 読込」でファイルを選ぶと自動でGitHubにアップロード</li>
+      <li>スマホで同じURLを開き「🔄 更新」で最新データを取得</li>
+    </ol>
+
+    <div class="sbtn-row">
+      <button id="btn-save-settings">保存 &amp; 接続テスト</button>
+      <button id="btn-close-settings">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="coords.js"></script>
+
+<script>
+'use strict';
+
+// ================================================================
+//  地図
+// ================================================================
+const map = L.map('map', {
+  center: [36.355, 136.914],
+  zoom: 11,
+  zoomControl: true
+});
+
+L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+  attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">地理院タイル</a>',
+  maxZoom: 18
+}).addTo(map);
+
+// ================================================================
+//  Canvas オーバーレイ（overlayPane 内に配置してパン追従を自動化）
+// ================================================================
+const canvas = document.createElement('canvas');
+canvas.style.cssText = 'position:absolute; left:0; top:0; pointer-events:none;';
+map.getPanes().overlayPane.appendChild(canvas);
+const ctx = canvas.getContext('2d');
+let pxX = null, pxY = null;
+let lonArr, latArr;
+let frames = [];
+let step    = 0;
+let opacity = 0.70;
+let maxVal  = 1.0;
+
+function initGrid() {
+  if (typeof GRID === 'undefined') {
+    toast('coords.js が見つかりません。prepare_coords.py を実行してください。');
+    return false;
+  }
+  const n = GRID.NI_NODE * GRID.NJ_NODE;
+  const raw = atob(GRID.data);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const f32 = new Float32Array(bytes.buffer);
+  lonArr = f32.subarray(0, n);
+  latArr = f32.subarray(n);
+  return true;
+}
+
+function computePx() {
+  if (!lonArr) return;
+  const n = lonArr.length;
+  pxX = new Float32Array(n);
+  pxY = new Float32Array(n);
+  const zoom   = map.getZoom();
+  const scale  = 256 * Math.pow(2, zoom);
+  const origin = map.getPixelOrigin();
+  const pi180  = Math.PI / 180;
+  for (let k = 0; k < n; k++) {
+    const sin = Math.sin(latArr[k] * pi180);
+    pxX[k] = (lonArr[k] + 180) / 360 * scale - origin.x;
+    pxY[k] = (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale - origin.y;
+  }
+}
+
+const CM_STOPS = [0, 0.25, 0.5, 0.75, 1.0];
+const CM_RGB   = [[0,0,255],[0,255,255],[0,255,0],[255,255,0],[255,0,0]];
+
+function valToColor(v, maxV) {
+  const t = Math.max(0, Math.min(1, v / maxV));
+  let lo = 0;
+  for (let i = 0; i < CM_STOPS.length - 1; i++) {
+    if (t <= CM_STOPS[i + 1]) { lo = i; break; }
+    lo = i;
+  }
+  const hi = Math.min(lo + 1, CM_STOPS.length - 1);
+  const span = CM_STOPS[hi] - CM_STOPS[lo];
+  const f = span > 0 ? (t - CM_STOPS[lo]) / span : 0;
+  const r = Math.round(CM_RGB[lo][0] + f * (CM_RGB[hi][0] - CM_RGB[lo][0]));
+  const g = Math.round(CM_RGB[lo][1] + f * (CM_RGB[hi][1] - CM_RGB[lo][1]));
+  const b = Math.round(CM_RGB[lo][2] + f * (CM_RGB[hi][2] - CM_RGB[lo][2]));
+  return `rgb(${r},${g},${b})`;
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!frames.length || !pxX) return;
+  const frame = frames[step];
+  const NI = GRID.NI, NJ = GRID.NJ, NI_N = GRID.NI_NODE;
+  ctx.globalAlpha = opacity;
+  for (let j = 0; j < NJ; j++) {
+    for (let i = 0; i < NI; i++) {
+      const val = frame[j * NI + i];
+      if (val < 0) continue;
+      const i00 = j * NI_N + i, i01 = i00 + 1;
+      const i10 = i00 + NI_N,   i11 = i10 + 1;
+      ctx.fillStyle = valToColor(val, maxVal);
+      ctx.beginPath();
+      ctx.moveTo(pxX[i00], pxY[i00]);
+      ctx.lineTo(pxX[i01], pxY[i01]);
+      ctx.lineTo(pxX[i11], pxY[i11]);
+      ctx.lineTo(pxX[i10], pxY[i10]);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function updateLegend() {
+  const bar = document.getElementById('legend-bar');
+  const lctx = bar.getContext('2d');
+  for (let x = 0; x < bar.width; x++) {
+    lctx.fillStyle = valToColor(x / bar.width * maxVal, maxVal);
+    lctx.fillRect(x, 0, 1, bar.height);
+  }
+  document.getElementById('leg-max').textContent = maxVal.toFixed(2);
+}
+
+function resizeCanvas() {
+  const size = map.getSize();
+  canvas.width = size.x; canvas.height = size.y;
+  computePx(); render();
+}
+
+map.on('moveend', () => { computePx(); render(); });
+map.on('zoomend',  () => { computePx(); render(); });
+window.addEventListener('resize', resizeCanvas);
+
+// ================================================================
+//  hs ファイルパース
+// ================================================================
+function parseHs(text) {
+  const n = GRID.NI * GRID.NJ;
+  const parts = text.trim().split(/\s+/);
+  if (parts.length !== n)
+    throw new Error(`値の数が不一致: 期待 ${n}, 実際 ${parts.length}`);
+  const arr = new Float32Array(n);
+  for (let k = 0; k < n; k++) arr[k] = parseFloat(parts[k]);
+  return arr;
+}
+
+function autoScale() {
+  if (!frames.length) return;
+  let mx = 0;
+  for (const f of frames) for (const v of f) if (v > mx) mx = v;
+  maxVal = Math.max(0.01, Math.ceil(mx * 100) / 100);
+  document.getElementById('in-maxval').value = maxVal;
+  updateLegend(); render();
+}
+
+// ================================================================
+//  GitHub 設定
+// ================================================================
+let ghOwner = '', ghRepo = '', ghToken = '', ghBranch = 'main';
+
+function loadGhSettings() {
+  ghOwner  = localStorage.getItem('gh_owner')  || '';
+  ghRepo   = localStorage.getItem('gh_repo')   || '';
+  ghToken  = localStorage.getItem('gh_token')  || '';
+  ghBranch = localStorage.getItem('gh_branch') || 'main';
+  // フォームに反映
+  const o = document.getElementById('gh-owner');
+  const r = document.getElementById('gh-repo');
+  const t = document.getElementById('gh-token');
+  const b = document.getElementById('gh-branch');
+  if (o) { o.value = ghOwner; r.value = ghRepo; t.value = ghToken; b.value = ghBranch; }
+}
+
+function ghHeaders(write) {
+  const h = { 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (ghToken) h['Authorization'] = `Bearer ${ghToken}`;
+  if (write) h['Content-Type'] = 'application/json';
+  return h;
+}
+
+// ================================================================
+//  GitHub アップロード
+// ================================================================
+async function uploadFileToGitHub(file) {
+  const text    = await file.text();
+  const content = btoa(unescape(encodeURIComponent(text)));
+  const apiUrl  = `https://api.github.com/repos/${ghOwner}/${ghRepo}/contents/data/${file.name}`;
+
+  let sha;
+  try {
+    const check = await fetch(apiUrl, { headers: ghHeaders(false) });
+    if (check.ok) sha = (await check.json()).sha;
+  } catch {}
+
+  const body = { message: `Upload ${file.name}`, content, branch: ghBranch };
+  if (sha) body.sha = sha;
+
+  const resp = await fetch(apiUrl, {
+    method: 'PUT', headers: ghHeaders(true), body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${resp.status}`);
+  }
+}
+
+// ================================================================
+//  GitHub ダウンロード
+// ================================================================
+async function loadFromGitHub() {
+  if (!ghOwner || !ghRepo) {
+    openSettings();
+    toast('GitHub設定を入力してください', 4000);
+    return;
+  }
+  toast('GitHubから読み込み中…');
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${ghOwner}/${ghRepo}/contents/data`,
+      { headers: ghHeaders(false) }
+    );
+    if (resp.status === 404) throw new Error('data/ フォルダが存在しません。PCから先に読込してください');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const items = (await resp.json())
+      .filter(f => /^hs/i.test(f.name) && f.name.endsWith('.out'))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    if (!items.length) {
+      toast('GitHubにhsファイルがありません。PCから読込してください', 4000);
+      return;
+    }
+
+    const newFrames = [];
+    for (const item of items) {
+      // download_url は public リポジトリなら直接取得可、private は API 経由
+      let text;
+      if (item.download_url && !ghToken) {
+        text = await (await fetch(item.download_url)).text();
+      } else {
+        const d = await (await fetch(item.url, { headers: ghHeaders(false) })).json();
+        text = decodeURIComponent(escape(atob(d.content.replace(/\n/g, ''))));
+      }
+      newFrames.push(parseHs(text));
+      toast(`読込中… ${newFrames.length}/${items.length}`);
+    }
+    frames = newFrames;
+    step = 0;
+    updateStepUI(); computePx(); render();
+    autoScale();
+    toast(`${frames.length} ステップ読込完了 (GitHub)`, 3000);
+  } catch (e) {
+    toast(`GitHub読込エラー: ${e.message}`, 6000);
+  }
+}
+
+// ================================================================
+//  ローカルファイル読込
+// ================================================================
+async function loadLocalFiles(fileList) {
+  const files = Array.from(fileList)
+    .filter(f => /^hs/i.test(f.name) && f.name.endsWith('.out'))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  if (!files.length) {
+    toast('hs から始まる .out ファイルを選択してください', 4000);
+    return;
+  }
+  toast(`${files.length} ファイルを読み込み中…`);
+  const newFrames = [];
+  for (const file of files) {
+    try { newFrames.push(parseHs(await file.text())); }
+    catch (e) { toast(`エラー (${file.name}): ${e.message}`, 5000); return; }
+  }
+  frames = newFrames;
+  step = 0;
+  updateStepUI(); computePx(); render();
+  autoScale();
+  toast(`${frames.length} ステップ読込完了`, 3000);
+
+  // GitHub にアップロード（設定済みの場合）
+  if (ghOwner && ghRepo && ghToken) {
+    toast('GitHub へアップロード中…');
+    let ok = 0;
+    for (const file of files) {
+      try { await uploadFileToGitHub(file); ok++; }
+      catch (e) { toast(`アップロードエラー (${file.name}): ${e.message}`, 5000); }
+    }
+    if (ok === files.length)
+      toast(`GitHub アップロード完了 (${ok}/${files.length})`, 3000);
+  }
+}
+
+// ================================================================
+//  data/ フォルダからの自動読込（ローカルサーバー）
+//  Python http.server のディレクトリ一覧 HTML を解析して hs*.out を全取得
+// ================================================================
+async function autoLoadLocal() {
+  try {
+    const resp = await fetch('data/');
+    if (!resp.ok) return false;
+    const html = await resp.text();
+    // ディレクトリ一覧の href から .out ファイルを抽出
+    const re = /href="([^"?#]*\.out)"/gi;
+    const found = [];
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const name = decodeURIComponent(m[1]).replace(/^.*\//, ''); // パス部分を除去
+      if (/^hs/i.test(name)) found.push(name);
+    }
+    found.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    if (!found.length) return false;
+
+    toast(`data/ から ${found.length} ファイルを自動読込中…`);
+    const newFrames = [];
+    for (const name of found) {
+      const r = await fetch(`data/${name}`);
+      if (!r.ok) continue;
+      newFrames.push(parseHs(await r.text()));
+    }
+    if (!newFrames.length) return false;
+    frames = newFrames;
+    step = 0;
+    updateStepUI(); computePx(); render();
+    autoScale();
+    toast(`${frames.length} ステップ読込完了`, 3000);
+    return true;
+  } catch { return false; }
+}
+
+// ================================================================
+//  アニメーション
+// ================================================================
+let playing = false, timer = null;
+
+function setStep(s) {
+  step = Math.max(0, Math.min(frames.length - 1, s));
+  render(); updateStepUI();
+}
+
+function togglePlay() {
+  if (playing) {
+    clearInterval(timer); timer = null; playing = false;
+    document.getElementById('btn-play').textContent = '▶';
+  } else {
+    playing = true;
+    document.getElementById('btn-play').textContent = '⏸';
+    const ms = Math.round(1500 / parseInt(document.getElementById('sl-speed').value));
+    timer = setInterval(() => {
+      let next = step + 1;
+      if (next >= frames.length) {
+        if (document.getElementById('chk-loop').checked) next = 0;
+        else { togglePlay(); return; }
+      }
+      setStep(next);
+    }, ms);
+  }
+}
+
+function updateStepUI() {
+  const has = frames.length > 0;
+  ['btn-play','btn-prev','btn-next'].forEach(id =>
+    document.getElementById(id).disabled = !has);
+  document.getElementById('step-disp').textContent =
+    has ? `${step + 1}/${frames.length}` : '-/-';
+}
+
+// ================================================================
+//  設定パネル
+// ================================================================
+function openSettings() {
+  loadGhSettings();
+  document.getElementById('settings-overlay').classList.add('open');
+}
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.remove('open');
+}
+
+async function saveAndTestSettings() {
+  const owner  = document.getElementById('gh-owner').value.trim();
+  const repo   = document.getElementById('gh-repo').value.trim();
+  const token  = document.getElementById('gh-token').value.trim();
+  const branch = document.getElementById('gh-branch').value.trim() || 'main';
+
+  if (!owner || !repo) {
+    document.getElementById('gh-status').textContent = '⚠ ユーザー名とリポジトリ名は必須です';
+    return;
+  }
+
+  localStorage.setItem('gh_owner',  owner);
+  localStorage.setItem('gh_repo',   repo);
+  localStorage.setItem('gh_token',  token);
+  localStorage.setItem('gh_branch', branch);
+  ghOwner = owner; ghRepo = repo; ghToken = token; ghBranch = branch;
+
+  // 接続テスト
+  document.getElementById('gh-status').textContent = '接続テスト中…';
+  try {
+    const h = { 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+    if (token) h['Authorization'] = `Bearer ${token}`;
+    const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers: h });
+    if (resp.ok) {
+      const d = await resp.json();
+      document.getElementById('gh-status').textContent =
+        `✅ 接続成功！リポジトリ: ${d.full_name} (${d.private ? '非公開' : '公開'})`;
+    } else if (resp.status === 404) {
+      document.getElementById('gh-status').textContent =
+        '❌ リポジトリが見つかりません。名前を確認してください';
+    } else if (resp.status === 401) {
+      document.getElementById('gh-status').textContent = '❌ トークンが無効です';
+    } else {
+      document.getElementById('gh-status').textContent = `❌ エラー: HTTP ${resp.status}`;
+    }
+  } catch (e) {
+    document.getElementById('gh-status').textContent = `❌ ネットワークエラー: ${e.message}`;
+  }
+}
+
+// ================================================================
+//  トースト
+// ================================================================
+let toastTimer = null;
+function toast(msg, duration) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.style.display = 'block';
+  clearTimeout(toastTimer);
+  if (duration) toastTimer = setTimeout(() => { el.style.display = 'none'; }, duration);
+}
+
+// ================================================================
+//  イベントリスナー
+// ================================================================
+document.getElementById('btn-upload').addEventListener('click', () =>
+  document.getElementById('file-input').click());
+
+document.getElementById('file-input').addEventListener('change', async e => {
+  await loadLocalFiles(e.target.files);
+  e.target.value = '';
+});
+
+document.getElementById('btn-play').addEventListener('click', togglePlay);
+document.getElementById('btn-prev').addEventListener('click', () => setStep(step - 1));
+document.getElementById('btn-next').addEventListener('click', () => setStep(step + 1));
+document.getElementById('btn-refresh').addEventListener('click', loadFromGitHub);
+document.getElementById('btn-settings').addEventListener('click', openSettings);
+document.getElementById('btn-close-settings').addEventListener('click', closeSettings);
+document.getElementById('btn-save-settings').addEventListener('click', saveAndTestSettings);
+
+document.getElementById('settings-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeSettings();
+});
+
+document.getElementById('sl-opacity').addEventListener('input', e => {
+  opacity = parseInt(e.target.value) / 100;
+  document.getElementById('lbl-opacity').textContent = e.target.value + '%';
+  render();
+});
+
+document.getElementById('in-maxval').addEventListener('change', e => {
+  maxVal = parseFloat(e.target.value) || 1.0;
+  updateLegend(); render();
+});
+
+document.getElementById('btn-auto').addEventListener('click', autoScale);
+
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', async e => {
+  e.preventDefault();
+  await loadLocalFiles(e.dataTransfer.files);
+});
+
+// ================================================================
+//  起動
+// ================================================================
+loadGhSettings();
+
+if (initGrid()) {
+  resizeCanvas();
+  updateLegend();
+  updateStepUI();
+
+  if (ghOwner && ghRepo) {
+    // GitHub設定済み → クラウドから自動読込
+    loadFromGitHub();
+  } else {
+    // ローカル：data/ フォルダがあれば自動読込
+    autoLoadLocal();
+  }
+}
+</script>
+</body>
+</html>
