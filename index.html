@@ -209,13 +209,22 @@ L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
 }).addTo(map);
 
 // ================================================================
-//  Canvas オーバーレイ（overlayPane 内に配置してパン追従を自動化）
+//  Canvas オーバーレイ（mapContainer 直下に配置 → CSS transform 問題を回避）
+//  世界ピクセル座標(ズーム変化時のみ再計算)を保持し、
+//  描画時に origin - panePos オフセットを引いてコンテナ座標に変換する
 // ================================================================
 const canvas = document.createElement('canvas');
-canvas.style.cssText = 'position:absolute; left:0; top:0; pointer-events:none;';
-map.getPanes().overlayPane.appendChild(canvas);
+canvas.style.cssText = 'position:absolute; left:0; top:0; pointer-events:none; z-index:400;';
+map.getContainer().appendChild(canvas);
 const ctx = canvas.getContext('2d');
-let pxX = null, pxY = null;
+
+// 世界ピクセル座標（ズームレベル固定、パン中も変化しない）
+let worldX = null, worldY = null;
+// 現在ズーム(worldX/worldY を再計算すべきか判定用)
+let _worldZoom = -1;
+// ステップ別の世界座標 Path2D キャッシュ（同色セルをまとめたもの）
+let worldPaths = null;  // { style: Path2D } in world pixel space
+
 let lonArr, latArr;
 let frames = [];
 let step    = 0;
@@ -237,20 +246,48 @@ function initGrid() {
   return true;
 }
 
-function computePx() {
+// ズーム変化時のみ再計算（パン中は不変）
+function computeWorldPx() {
   if (!lonArr) return;
-  const n = lonArr.length;
-  pxX = new Float32Array(n);
-  pxY = new Float32Array(n);
-  const zoom   = map.getZoom();
-  const scale  = 256 * Math.pow(2, zoom);
-  const origin = map.getPixelOrigin();
-  const pi180  = Math.PI / 180;
+  const zoom = map.getZoom();
+  if (_worldZoom === zoom && worldX) return;  // 同じズームなら再計算不要
+  _worldZoom = zoom;
+  const n     = lonArr.length;
+  worldX = new Float64Array(n);  // 高ズームでの精度確保に Float64 を使用
+  worldY = new Float64Array(n);
+  const scale = 256 * Math.pow(2, zoom);
+  const pi180 = Math.PI / 180;
   for (let k = 0; k < n; k++) {
-    const sin = Math.sin(latArr[k] * pi180);
-    pxX[k] = (lonArr[k] + 180) / 360 * scale - origin.x;
-    pxY[k] = (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale - origin.y;
+    const sin  = Math.sin(latArr[k] * pi180);
+    worldX[k]  = (lonArr[k] + 180) / 360 * scale;
+    worldY[k]  = (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale;
   }
+}
+
+// 現在ステップ・maxVal に対する Path2D をワールド座標で構築
+// パン中は再構築不要（render() で translate するだけ）
+function buildWorldPaths() {
+  worldPaths = null;
+  if (!frames.length || !worldX) return;
+  const { wetIdx, vals } = frames[step];
+  if (!wetIdx.length) return;
+  const NI = GRID.NI, NI_N = GRID.NI_NODE;
+  const paths = {};
+  for (let k = 0; k < wetIdx.length; k++) {
+    const idx   = wetIdx[k];
+    const style = getStyle(vals[idx], maxVal);
+    let p = paths[style];
+    if (!p) { p = new Path2D(); paths[style] = p; }
+    const j   = (idx / NI) | 0;
+    const i   = idx - j * NI;
+    const i00 = j * NI_N + i;
+    p.moveTo(worldX[i00],          worldY[i00]);
+    p.lineTo(worldX[i00 + 1],      worldY[i00 + 1]);
+    p.lineTo(worldX[i00 + NI_N+1], worldY[i00 + NI_N+1]);
+    p.lineTo(worldX[i00 + NI_N],   worldY[i00 + NI_N]);
+    p.closePath();
+  }
+  worldPaths = paths;
 }
 
 // ================================================================
@@ -286,33 +323,25 @@ function getStyle(v, maxV) {
 
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!frames.length || !pxX) return;
-  const { wetIdx, vals } = frames[step];
-  if (!wetIdx.length) return;
-  const NI = GRID.NI, NI_N = GRID.NI_NODE;
-  ctx.globalAlpha = opacity;
+  if (!worldPaths) return;
 
-  // 同色セルをまとめて Path2D に積んで一括 fill（描画コール最小化）
-  const paths = {};
-  for (let k = 0; k < wetIdx.length; k++) {
-    const idx  = wetIdx[k];
-    const style = getStyle(vals[idx], maxVal);
-    let p = paths[style];
-    if (!p) { p = new Path2D(); paths[style] = p; }
-    const j   = (idx / NI) | 0;
-    const i   = idx - j * NI;
-    const i00 = j * NI_N + i;
-    p.moveTo(pxX[i00],          pxY[i00]);
-    p.lineTo(pxX[i00 + 1],      pxY[i00 + 1]);
-    p.lineTo(pxX[i00 + NI_N+1], pxY[i00 + NI_N+1]);
-    p.lineTo(pxX[i00 + NI_N],   pxY[i00 + NI_N]);
-    p.closePath();
-  }
-  for (const [style, path] of Object.entries(paths)) {
+  // コンテナ座標 = ワールドピクセル - (origin - panePos)
+  // origin: Leaflet の CRS ピクセル原点（mapPane 位置を含む）
+  // panePos: mapPane の実際の CSS transform オフセット
+  // → ox, oy を引くと「コンテナ左上を (0,0) とした座標」になる
+  const origin  = map.getPixelOrigin();
+  const panePos = L.DomUtil.getPosition(map.getPanes().mapPane);
+  const ox = origin.x - panePos.x;
+  const oy = origin.y - panePos.y;
+
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.translate(-ox, -oy);  // ワールド座標 → コンテナ座標へシフト
+  for (const [style, path] of Object.entries(worldPaths)) {
     ctx.fillStyle = style;
     ctx.fill(path);
   }
-  ctx.globalAlpha = 1;
+  ctx.restore();
 }
 
 function updateLegend() {
@@ -328,11 +357,23 @@ function updateLegend() {
 function resizeCanvas() {
   const size = map.getSize();
   canvas.width = size.x; canvas.height = size.y;
-  computePx(); render();
+  render();
 }
 
-map.on('moveend', () => { computePx(); render(); });
-map.on('zoomend',  () => { computePx(); render(); });
+// RAF スロットル（move イベントは毎フレーム来るため）
+let _rafId = null;
+function scheduleRender() {
+  if (_rafId) return;
+  _rafId = requestAnimationFrame(() => { _rafId = null; render(); });
+}
+
+map.on('move',    scheduleRender);         // パン中もリアルタイム追従
+map.on('moveend', scheduleRender);         // パン終了後に確定描画
+map.on('zoomend', () => {                  // ズーム変化: 世界座標を再計算してパス再構築
+  computeWorldPx();
+  buildWorldPaths();
+  scheduleRender();
+});
 window.addEventListener('resize', resizeCanvas);
 
 // ================================================================
@@ -364,7 +405,7 @@ function autoScale() {
   const p99  = posVals[Math.floor(posVals.length * 0.99)];
   maxVal = Math.max(0.01, Math.round(p99 * 10) / 10);
   document.getElementById('in-maxval').value = maxVal;
-  updateLegend(); render();
+  updateLegend(); buildWorldPaths(); render();
 }
 
 // ================================================================
@@ -463,7 +504,7 @@ async function loadFromGitHub() {
     }
     frames = newFrames.filter(Boolean);
     step = 0;
-    updateStepUI(); computePx(); render();
+    updateStepUI(); computeWorldPx(); buildWorldPaths(); render();
     autoScale();
     toast(`${frames.length} ステップ読込完了 (GitHub)`, 3000);
   } catch (e) {
@@ -490,7 +531,7 @@ async function loadLocalFiles(fileList) {
   } catch (e) { toast(`エラー: ${e.message}`, 5000); return; }
   frames = newFrames;
   step = 0;
-  updateStepUI(); computePx(); render();
+  updateStepUI(); computeWorldPx(); buildWorldPaths(); render();
   autoScale();
   toast(`${frames.length} ステップ読込完了`, 3000);
 
@@ -543,7 +584,7 @@ async function autoLoadLocal() {
     if (!validFrames.length) return false;
     frames = validFrames;
     step = 0;
-    updateStepUI(); computePx(); render();
+    updateStepUI(); computeWorldPx(); buildWorldPaths(); render();
     autoScale();
     toast(`${frames.length} ステップ読込完了`, 3000);
     return true;
@@ -557,7 +598,7 @@ let playing = false, timer = null;
 
 function setStep(s) {
   step = Math.max(0, Math.min(frames.length - 1, s));
-  render(); updateStepUI();
+  buildWorldPaths(); render(); updateStepUI();
 }
 
 function togglePlay() {
@@ -680,7 +721,7 @@ document.getElementById('sl-opacity').addEventListener('input', e => {
 
 document.getElementById('in-maxval').addEventListener('change', e => {
   maxVal = parseFloat(e.target.value) || 1.0;
-  updateLegend(); render();
+  updateLegend(); buildWorldPaths(); render();
 });
 
 document.getElementById('btn-auto').addEventListener('click', autoScale);
@@ -697,7 +738,8 @@ document.addEventListener('drop', async e => {
 loadGhSettings();
 
 if (initGrid()) {
-  resizeCanvas();
+  computeWorldPx();   // ズーム確定後に世界座標を計算
+  resizeCanvas();     // canvas サイズ設定 + 初回描画
   updateLegend();
   updateStepUI();
 
