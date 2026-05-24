@@ -340,15 +340,16 @@ function autoScale() {
 }
 
 // ================================================================
-//  GitHub 設定
+//  GitHub 設定（デフォルト値 ── スマホはこのまま使用可）
 // ================================================================
+const DEFAULT_GH = { owner: 'yama-k-0129', repo: 'iric-results', branch: 'main' };
 let ghOwner = '', ghRepo = '', ghToken = '', ghBranch = 'main';
 
 function loadGhSettings() {
-  ghOwner  = localStorage.getItem('gh_owner')  || '';
-  ghRepo   = localStorage.getItem('gh_repo')   || '';
+  ghOwner  = localStorage.getItem('gh_owner')  || DEFAULT_GH.owner;
+  ghRepo   = localStorage.getItem('gh_repo')   || DEFAULT_GH.repo;
   ghToken  = localStorage.getItem('gh_token')  || '';
-  ghBranch = localStorage.getItem('gh_branch') || 'main';
+  ghBranch = localStorage.getItem('gh_branch') || DEFAULT_GH.branch;
   // フォームに反映
   const o = document.getElementById('gh-owner');
   const r = document.getElementById('gh-repo');
@@ -665,12 +666,15 @@ if (initGrid()) {
   updateLegend();
   updateStepUI();
 
-  if (ghOwner && ghRepo) {
-    // GitHub設定済み → クラウドから自動読込
+  const isLocalhost = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+  if (isLocalhost) {
+    // ローカル: data/ フォルダ優先、なければ GitHub にフォールバック
+    autoLoadLocal().then(found => {
+      if (!found && ghOwner && ghRepo) loadFromGitHub();
+    });
+  } else if (ghOwner && ghRepo) {
+    // GitHub Pages 等の外部URL: クラウドから自動読込
     loadFromGitHub();
-  } else {
-    // ローカル：data/ フォルダがあれば自動読込
-    autoLoadLocal();
   }
 }
 </script>
