@@ -253,46 +253,64 @@ function computePx() {
   }
 }
 
-const CM_STOPS = [0, 0.25, 0.5, 0.75, 1.0];
-const CM_RGB   = [[0,0,255],[0,255,255],[0,255,0],[255,255,0],[255,0,0]];
+// ================================================================
+//  カラーLUT（256段階プリコンピュート、sqrt スケールで浅水識別性向上）
+// ================================================================
+const _STOPS = [0, 0.25, 0.5, 0.75, 1.0];
+const _RGB   = [[0,0,255],[0,255,255],[0,255,0],[255,255,0],[255,0,0]];
 
-function valToColor(v, maxV) {
-  const t = Math.max(0, Math.min(1, v / maxV));
-  let lo = 0;
-  for (let i = 0; i < CM_STOPS.length - 1; i++) {
-    if (t <= CM_STOPS[i + 1]) { lo = i; break; }
-    lo = i;
+const STYLE_LUT = (() => {
+  const lut = [];
+  for (let idx = 0; idx < 256; idx++) {
+    const t = idx / 255;
+    let lo = _STOPS.length - 2;
+    for (let s = 0; s < _STOPS.length - 1; s++) {
+      if (t <= _STOPS[s + 1]) { lo = s; break; }
+    }
+    const hi   = lo + 1;
+    const span = _STOPS[hi] - _STOPS[lo] || 1;
+    const f    = (t - _STOPS[lo]) / span;
+    const r = Math.round(_RGB[lo][0] + f * (_RGB[hi][0] - _RGB[lo][0]));
+    const g = Math.round(_RGB[lo][1] + f * (_RGB[hi][1] - _RGB[lo][1]));
+    const b = Math.round(_RGB[lo][2] + f * (_RGB[hi][2] - _RGB[lo][2]));
+    lut.push(`rgb(${r},${g},${b})`);
   }
-  const hi = Math.min(lo + 1, CM_STOPS.length - 1);
-  const span = CM_STOPS[hi] - CM_STOPS[lo];
-  const f = span > 0 ? (t - CM_STOPS[lo]) / span : 0;
-  const r = Math.round(CM_RGB[lo][0] + f * (CM_RGB[hi][0] - CM_RGB[lo][0]));
-  const g = Math.round(CM_RGB[lo][1] + f * (CM_RGB[hi][1] - CM_RGB[lo][1]));
-  const b = Math.round(CM_RGB[lo][2] + f * (CM_RGB[hi][2] - CM_RGB[lo][2]));
-  return `rgb(${r},${g},${b})`;
+  return lut;
+})();
+
+// sqrt スケールで浅水部の色識別性を向上（val=0 は描画しない）
+function getStyle(v, maxV) {
+  const t = maxV > 0 ? Math.sqrt(Math.min(v / maxV, 1)) : 0;
+  return STYLE_LUT[Math.round(t * 255)];
 }
 
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!frames.length || !pxX) return;
-  const frame = frames[step];
-  const NI = GRID.NI, NJ = GRID.NJ, NI_N = GRID.NI_NODE;
+  const { wetIdx, vals } = frames[step];
+  if (!wetIdx.length) return;
+  const NI = GRID.NI, NI_N = GRID.NI_NODE;
   ctx.globalAlpha = opacity;
-  for (let j = 0; j < NJ; j++) {
-    for (let i = 0; i < NI; i++) {
-      const val = frame[j * NI + i];
-      if (val < 0) continue;
-      const i00 = j * NI_N + i, i01 = i00 + 1;
-      const i10 = i00 + NI_N,   i11 = i10 + 1;
-      ctx.fillStyle = valToColor(val, maxVal);
-      ctx.beginPath();
-      ctx.moveTo(pxX[i00], pxY[i00]);
-      ctx.lineTo(pxX[i01], pxY[i01]);
-      ctx.lineTo(pxX[i11], pxY[i11]);
-      ctx.lineTo(pxX[i10], pxY[i10]);
-      ctx.closePath();
-      ctx.fill();
-    }
+
+  // 同色セルをまとめて Path2D に積んで一括 fill（描画コール最小化）
+  const paths = {};
+  for (let k = 0; k < wetIdx.length; k++) {
+    const idx  = wetIdx[k];
+    const style = getStyle(vals[idx], maxVal);
+    let p = paths[style];
+    if (!p) { p = new Path2D(); paths[style] = p; }
+    const j   = (idx / NI) | 0;
+    const i   = idx - j * NI;
+    const i00 = j * NI_N + i;
+    p.moveTo(pxX[i00],          pxY[i00]);
+    p.lineTo(pxX[i00 + 1],      pxY[i00 + 1]);
+    p.lineTo(pxX[i00 + NI_N+1], pxY[i00 + NI_N+1]);
+    p.lineTo(pxX[i00 + NI_N],   pxY[i00 + NI_N]);
+    p.closePath();
+  }
+  for (const [style, path] of Object.entries(paths)) {
+    ctx.fillStyle = style;
+    ctx.fill(path);
   }
   ctx.globalAlpha = 1;
 }
@@ -301,7 +319,7 @@ function updateLegend() {
   const bar = document.getElementById('legend-bar');
   const lctx = bar.getContext('2d');
   for (let x = 0; x < bar.width; x++) {
-    lctx.fillStyle = valToColor(x / bar.width * maxVal, maxVal);
+    lctx.fillStyle = STYLE_LUT[Math.round(x / bar.width * 255)];
     lctx.fillRect(x, 0, 1, bar.height);
   }
   document.getElementById('leg-max').textContent = maxVal.toFixed(2);
@@ -321,20 +339,30 @@ window.addEventListener('resize', resizeCanvas);
 //  hs ファイルパース
 // ================================================================
 function parseHs(text) {
-  const n = GRID.NI * GRID.NJ;
+  const n     = GRID.NI * GRID.NJ;
   const parts = text.trim().split(/\s+/);
   if (parts.length !== n)
     throw new Error(`値の数が不一致: 期待 ${n}, 実際 ${parts.length}`);
-  const arr = new Float32Array(n);
-  for (let k = 0; k < n; k++) arr[k] = parseFloat(parts[k]);
-  return arr;
+  const vals   = new Float32Array(n);
+  const wetArr = [];
+  for (let k = 0; k < n; k++) {
+    vals[k] = parseFloat(parts[k]);
+    if (vals[k] > 0) wetArr.push(k); // val>0 のみ描画（0=境界, 負=陸地）
+  }
+  return { vals, wetIdx: new Int32Array(wetArr) };
 }
 
 function autoScale() {
   if (!frames.length) return;
-  let mx = 0;
-  for (const f of frames) for (const v of f) if (v > mx) mx = v;
-  maxVal = Math.max(0.01, Math.ceil(mx * 100) / 100);
+  // val>0 の値のみ対象に99パーセンタイルをmaxValに設定（外れ値対策）
+  const posVals = [];
+  for (const { vals } of frames) {
+    for (const v of vals) { if (v > 0) posVals.push(v); }
+  }
+  if (!posVals.length) { toast('正の値が見つかりません', 3000); return; }
+  posVals.sort((a, b) => a - b);
+  const p99  = posVals[Math.floor(posVals.length * 0.99)];
+  maxVal = Math.max(0.01, Math.round(p99 * 10) / 10);
   document.getElementById('in-maxval').value = maxVal;
   updateLegend(); render();
 }
@@ -418,20 +446,22 @@ async function loadFromGitHub() {
       return;
     }
 
-    const newFrames = [];
-    for (const item of items) {
-      // download_url は public リポジトリなら直接取得可、private は API 経由
-      let text;
-      if (item.download_url && !ghToken) {
-        text = await (await fetch(item.download_url)).text();
-      } else {
+    // 並列バッチダウンロード（8本同時）
+    const BATCH = 8;
+    const newFrames = new Array(items.length);
+    for (let s = 0; s < items.length; s += BATCH) {
+      const batch = items.slice(s, s + BATCH);
+      const results = await Promise.all(batch.map(async item => {
+        if (item.download_url && !ghToken) {
+          return parseHs(await (await fetch(item.download_url)).text());
+        }
         const d = await (await fetch(item.url, { headers: ghHeaders(false) })).json();
-        text = decodeURIComponent(escape(atob(d.content.replace(/\n/g, ''))));
-      }
-      newFrames.push(parseHs(text));
-      toast(`読込中… ${newFrames.length}/${items.length}`);
+        return parseHs(decodeURIComponent(escape(atob(d.content.replace(/\n/g, '')))));
+      }));
+      results.forEach((f, i) => { newFrames[s + i] = f; });
+      toast(`読込中… ${Math.min(s + BATCH, items.length)}/${items.length}`);
     }
-    frames = newFrames;
+    frames = newFrames.filter(Boolean);
     step = 0;
     updateStepUI(); computePx(); render();
     autoScale();
@@ -454,11 +484,10 @@ async function loadLocalFiles(fileList) {
     return;
   }
   toast(`${files.length} ファイルを読み込み中…`);
-  const newFrames = [];
-  for (const file of files) {
-    try { newFrames.push(parseHs(await file.text())); }
-    catch (e) { toast(`エラー (${file.name}): ${e.message}`, 5000); return; }
-  }
+  let newFrames;
+  try {
+    newFrames = await Promise.all(files.map(f => f.text().then(parseHs)));
+  } catch (e) { toast(`エラー: ${e.message}`, 5000); return; }
   frames = newFrames;
   step = 0;
   updateStepUI(); computePx(); render();
@@ -499,14 +528,20 @@ async function autoLoadLocal() {
     if (!found.length) return false;
 
     toast(`data/ から ${found.length} ファイルを自動読込中…`);
-    const newFrames = [];
-    for (const name of found) {
-      const r = await fetch(`data/${name}`);
-      if (!r.ok) continue;
-      newFrames.push(parseHs(await r.text()));
+    const BATCH = 4;
+    const newFrames = new Array(found.length);
+    for (let s = 0; s < found.length; s += BATCH) {
+      const batch = found.slice(s, s + BATCH);
+      const results = await Promise.all(batch.map(async name => {
+        const r = await fetch(`data/${name}`);
+        return r.ok ? parseHs(await r.text()) : null;
+      }));
+      results.forEach((f, i) => { newFrames[s + i] = f; });
+      toast(`data/ 読込中… ${Math.min(s + BATCH, found.length)}/${found.length}`);
     }
-    if (!newFrames.length) return false;
-    frames = newFrames;
+    const validFrames = newFrames.filter(Boolean);
+    if (!validFrames.length) return false;
+    frames = validFrames;
     step = 0;
     updateStepUI(); computePx(); render();
     autoScale();
