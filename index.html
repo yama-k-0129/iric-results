@@ -124,6 +124,7 @@ label.chk { font-size:12px; display:flex; align-items:center; gap:3px; }
     <label class="chk"><input type="checkbox" id="chk-loop" checked> ループ</label>
 
     <button id="btn-refresh" title="GitHubから最新データを読込">🔄 更新</button>
+    <button id="btn-debug"   title="格子境界ボックスの表示/非表示">🔲</button>
     <button id="btn-settings" title="GitHub接続設定">⚙</button>
   </div>
   <div class="row">
@@ -231,6 +232,28 @@ let step    = 0;
 let opacity = 0.70;
 let maxVal  = 1.0;
 
+// 位置確認用：領域境界ボックスを Leaflet で表示
+let _debugRect = null;
+function toggleDebugBounds() {
+  if (_debugRect) {
+    map.removeLayer(_debugRect); _debugRect = null;
+    toast('境界ボックス非表示', 2000); return;
+  }
+  if (!lonArr) return;
+  const n = lonArr.length;
+  const swLat = latArr[0], swLon = lonArr[0];
+  const neLat = latArr[n-1], neLon = lonArr[n-1];
+  _debugRect = L.rectangle([[swLat, swLon], [neLat, neLon]], {
+    color: '#ff0', weight: 2, fillOpacity: 0, dashArray: '6 4'
+  }).addTo(map);
+  // 中心マーカー
+  const clat = (swLat + neLat) / 2, clon = (swLon + neLon) / 2;
+  L.circleMarker([clat, clon], {radius: 5, color: '#f00', fillColor:'#f00', fillOpacity:1})
+    .bindPopup(`格子中心: ${clat.toFixed(4)}, ${clon.toFixed(4)}`).addTo(_debugRect);
+  map.fitBounds([[swLat, swLon], [neLat, neLon]]);
+  toast(`境界ボックス表示: SW(${swLat.toFixed(3)},${swLon.toFixed(3)}) NE(${neLat.toFixed(3)},${neLon.toFixed(3)})`, 5000);
+}
+
 function initGrid() {
   if (typeof GRID === 'undefined') {
     toast('coords.js が見つかりません。prepare_coords.py を実行してください。');
@@ -271,16 +294,19 @@ function buildWorldPaths() {
   if (!frames.length || !worldX) return;
   const { wetIdx, vals } = frames[step];
   if (!wetIdx.length) return;
-  const NI = GRID.NI, NI_N = GRID.NI_NODE;
+  const NI = GRID.NI, NJ = GRID.NJ, NI_N = GRID.NI_NODE;
   const paths = {};
   for (let k = 0; k < wetIdx.length; k++) {
     const idx   = wetIdx[k];
     const style = getStyle(vals[idx], maxVal);
     let p = paths[style];
     if (!p) { p = new Path2D(); paths[style] = p; }
-    const j   = (idx / NI) | 0;
-    const i   = idx - j * NI;
-    const i00 = j * NI_N + i;
+    // hs ファイルは標準ラスター形式（北→南順: 行0=北端）
+    // coords.js は j=0=南端 なので j 方向を反転する
+    const j_f = (idx / NI) | 0;          // hs ファイル行番号（0=北）
+    const i   = idx - j_f * NI;
+    const j_c = NJ - 1 - j_f;            // coords 上の j（0=南）
+    const i00 = j_c * NI_N + i;          // SW コーナーノードのインデックス
     p.moveTo(worldX[i00],          worldY[i00]);
     p.lineTo(worldX[i00 + 1],      worldY[i00 + 1]);
     p.lineTo(worldX[i00 + NI_N+1], worldY[i00 + NI_N+1]);
@@ -705,6 +731,7 @@ document.getElementById('btn-play').addEventListener('click', togglePlay);
 document.getElementById('btn-prev').addEventListener('click', () => setStep(step - 1));
 document.getElementById('btn-next').addEventListener('click', () => setStep(step + 1));
 document.getElementById('btn-refresh').addEventListener('click', loadFromGitHub);
+document.getElementById('btn-debug').addEventListener('click', toggleDebugBounds);
 document.getElementById('btn-settings').addEventListener('click', openSettings);
 document.getElementById('btn-close-settings').addEventListener('click', closeSettings);
 document.getElementById('btn-save-settings').addEventListener('click', saveAndTestSettings);
